@@ -24,6 +24,10 @@ func (r *RabbitmqClusterReconciler) scaleDown(ctx context.Context, cluster *v1be
 		reason := "UnsupportedOperation"
 		logger.Error(errors.New(reason), msg)
 		r.Recorder.Event(cluster, corev1.EventTypeWarning, reason, msg)
+		r.logTrace(ctx, "ScaleDownRejected", "", cluster, map[string]interface{}{
+			"currentReplicas": currentReplicas,
+			"desiredReplicas": desiredReplicas,
+		})
 		cluster.Status.SetCondition(status.ReconcileSuccess, corev1.ConditionFalse, reason, msg)
 		if statusErr := r.Status().Update(ctx, cluster); statusErr != nil {
 			logger.Error(statusErr, "Failed to update ReconcileSuccess condition state")

@@ -53,9 +53,20 @@ func (r *RabbitmqClusterReconciler) updateRabbitmqCluster(ctx context.Context, r
 			logger.Info(fmt.Sprintf("failed to update %s because of conflict; requeueing...", updateType),
 				"namespace", rabbitmqCluster.Namespace,
 				"name", rabbitmqCluster.Name)
+			r.logTrace(ctx, "OperatorDefaultsUpdateDeferred", "", rabbitmqCluster, map[string]interface{}{
+				"updateType": updateType,
+				"error":      err.Error(),
+			})
 			return 2 * time.Second, nil
 		}
+		r.logTrace(ctx, "OperatorDefaultsUpdateFailed", "", rabbitmqCluster, map[string]interface{}{
+			"updateType": updateType,
+			"error":      err.Error(),
+		})
 		return 0, err
 	}
+	r.logTrace(ctx, "OperatorDefaultsUpdated", "", rabbitmqCluster, map[string]interface{}{
+		"updateType": updateType,
+	})
 	return 0, nil
 }

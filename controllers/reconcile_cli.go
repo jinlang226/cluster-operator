@@ -23,6 +23,9 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 	}
 	if !allReplicasReadyAndUpdated(sts) {
 		logger.V(1).Info("not all replicas ready yet; requeuing request to run RabbitMQ CLI commands")
+		r.logTrace(ctx, "CLICommandsDeferred", "", rmq, map[string]interface{}{
+			"reason": "notReady",
+		})
 		return 15 * time.Second, nil
 	}
 	// Retrieve the plugins config map, if it exists.
@@ -39,6 +42,9 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 		// give StatefulSet controller some time to trigger restart of StatefulSet if necessary
 		// otherwise, there would be race conditions where we exec into containers losing the connection due to pods being terminated
 		logger.V(1).Info("requeuing request to set plugins")
+		r.logTrace(ctx, "CLICommandsDeferred", "", rmq, map[string]interface{}{
+			"reason": "pluginsConfigUpdatedRecently",
+		})
 		return 2 * time.Second, nil
 	}
 
@@ -69,14 +75,24 @@ func (r *RabbitmqClusterReconciler) runEnableFeatureFlagsCommand(ctx context.Con
 	logger := ctrl.LoggerFrom(ctx)
 	podName := fmt.Sprintf("%s-0", rmq.ChildResourceName("server"))
 	cmd := "rabbitmqctl enable_feature_flag all"
+	r.logTrace(ctx, "EnableFeatureFlagsStart", podName, rmq, map[string]interface{}{
+		"command": cmd,
+	})
 	stdout, stderr, err := r.exec(rmq.Namespace, podName, "rabbitmq", "bash", "-c", cmd)
 	if err != nil {
 		msg := "failed to enable all feature flags on pod"
 		logger.Error(err, msg, "pod", podName, "command", cmd, "stdout", stdout, "stderr", stderr)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
+		r.logTrace(ctx, "EnableFeatureFlagsFailed", podName, rmq, map[string]interface{}{
+			"command": cmd,
+			"error":   err.Error(),
+		})
 		return fmt.Errorf("%s %s: %w", msg, podName, err)
 	}
 	logger.Info("successfully enabled all feature flags")
+	r.logTrace(ctx, "FeatureFlagsEnabled", podName, rmq, map[string]interface{}{
+		"command": cmd,
+	})
 	return r.deleteAnnotation(ctx, sts, stsCreateAnnotation)
 }
 
@@ -90,13 +106,23 @@ func (r *RabbitmqClusterReconciler) runSetPluginsCommand(ctx context.Context, rm
 	for i := int32(0); i < *rmq.Spec.Replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", rmq.ChildResourceName("server"), i)
 		cmd := fmt.Sprintf("rabbitmq-plugins set %s", plugins.AsString(" "))
+		r.logTrace(ctx, "SetPluginsStart", podName, rmq, map[string]interface{}{
+			"command": cmd,
+		})
 		stdout, stderr, err := r.exec(rmq.Namespace, podName, "rabbitmq", "sh", "-c", cmd)
 		if err != nil {
 			msg := "failed to set plugins on pod"
 			logger.Error(err, msg, "pod", podName, "command", cmd, "stdout", stdout, "stderr", stderr)
 			r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
+			r.logTrace(ctx, "SetPluginsFailed", podName, rmq, map[string]interface{}{
+				"command": cmd,
+				"error":   err.Error(),
+			})
 			return fmt.Errorf("%s %s: %w", msg, podName, err)
 		}
+		r.logTrace(ctx, "SetPlugins", podName, rmq, map[string]interface{}{
+			"command": cmd,
+		})
 	}
 	logger.Info("successfully set plugins")
 	return r.deleteAnnotation(ctx, configMap, pluginsUpdateAnnotation)
@@ -106,14 +132,24 @@ func (r *RabbitmqClusterReconciler) runQueueRebalanceCommand(ctx context.Context
 	logger := ctrl.LoggerFrom(ctx)
 	podName := fmt.Sprintf("%s-0", rmq.ChildResourceName("server"))
 	cmd := "rabbitmq-queues rebalance all"
+	r.logTrace(ctx, "QueueRebalanceStart", podName, rmq, map[string]interface{}{
+		"command": cmd,
+	})
 	stdout, stderr, err := r.exec(rmq.Namespace, podName, "rabbitmq", "sh", "-c", cmd)
 	if err != nil {
 		msg := "failed to run queue rebalance on pod"
 		logger.Error(err, msg, "pod", podName, "command", cmd, "stdout", stdout, "stderr", stderr)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
+		r.logTrace(ctx, "QueueRebalanceFailed", podName, rmq, map[string]interface{}{
+			"command": cmd,
+			"error":   err.Error(),
+		})
 		return fmt.Errorf("%s %s: %w", msg, podName, err)
 	}
 	logger.Info("successfully rebalanced queues")
+	r.logTrace(ctx, "QueueRebalance", podName, rmq, map[string]interface{}{
+		"command": cmd,
+	})
 	return r.deleteAnnotation(ctx, rmq, queueRebalanceAnnotation)
 }
 

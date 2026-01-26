@@ -21,15 +21,27 @@ func (r *RabbitmqClusterReconciler) reconcileTLS(ctx context.Context, rabbitmqCl
 	if rabbitmqCluster.DisableNonTLSListeners() && !rabbitmqCluster.TLSEnabled() {
 		r.Recorder.Event(rabbitmqCluster, corev1.EventTypeWarning, "TLSError", errDisableNonTLSConfig.Error())
 		ctrl.LoggerFrom(ctx).Error(errDisableNonTLSConfig, "Error setting up TLS")
+		r.logTrace(ctx, "TLSError", "", rabbitmqCluster, map[string]interface{}{
+			"error": errDisableNonTLSConfig.Error(),
+		})
 		r.setReconcileSuccess(ctx, rabbitmqCluster, corev1.ConditionFalse, "TLSError", errDisableNonTLSConfig.Error())
 		return errDisableNonTLSConfig
 	}
 
 	if rabbitmqCluster.SecretTLSEnabled() {
+		r.logTrace(ctx, "TLSCheckStart", "", rabbitmqCluster, map[string]interface{}{
+			"secretName": rabbitmqCluster.Spec.TLS.SecretName,
+		})
 		if err := r.checkTLSSecrets(ctx, rabbitmqCluster); err != nil {
 			r.setReconcileSuccess(ctx, rabbitmqCluster, corev1.ConditionFalse, "TLSError", err.Error())
+			r.logTrace(ctx, "TLSError", "", rabbitmqCluster, map[string]interface{}{
+				"error": err.Error(),
+			})
 			return err
 		}
+		r.logTrace(ctx, "TLSCheckSuccess", "", rabbitmqCluster, map[string]interface{}{
+			"secretName": rabbitmqCluster.Spec.TLS.SecretName,
+		})
 	}
 	return nil
 }
@@ -46,6 +58,10 @@ func (r *RabbitmqClusterReconciler) checkTLSSecrets(ctx context.Context, rabbitm
 		r.Recorder.Event(rabbitmqCluster, corev1.EventTypeWarning, "TLSError",
 			fmt.Sprintf("Failed to get TLS secret %s in namespace %s: %v", secretName, rabbitmqCluster.Namespace, err.Error()))
 		logger.Error(err, "Error setting up TLS")
+		r.logTrace(ctx, "TLSError", "", rabbitmqCluster, map[string]interface{}{
+			"secretName": secretName,
+			"error":      err.Error(),
+		})
 		return err
 	}
 	// check if secret has the right keys
@@ -55,6 +71,10 @@ func (r *RabbitmqClusterReconciler) checkTLSSecrets(ctx context.Context, rabbitm
 		err := k8serrors.NewBadRequest(fmt.Sprintf("TLS secret %s in namespace %s does not have the fields tls.crt and tls.key", secretName, rabbitmqCluster.Namespace))
 		r.Recorder.Event(rabbitmqCluster, corev1.EventTypeWarning, "TLSError", err.Error())
 		logger.Error(err, "Error setting up TLS")
+		r.logTrace(ctx, "TLSError", "", rabbitmqCluster, map[string]interface{}{
+			"secretName": secretName,
+			"error":      err.Error(),
+		})
 		return err
 	}
 
@@ -71,6 +91,10 @@ func (r *RabbitmqClusterReconciler) checkTLSSecrets(ctx context.Context, rabbitm
 				r.Recorder.Event(rabbitmqCluster, corev1.EventTypeWarning, "TLSError",
 					fmt.Sprintf("Failed to get CA certificate secret %v in namespace %v: %v", secretName, rabbitmqCluster.Namespace, err.Error()))
 				logger.Error(err, "Error setting up TLS")
+				r.logTrace(ctx, "TLSError", "", rabbitmqCluster, map[string]interface{}{
+					"secretName": secretName,
+					"error":      err.Error(),
+				})
 				return err
 			}
 		}
@@ -80,6 +104,10 @@ func (r *RabbitmqClusterReconciler) checkTLSSecrets(ctx context.Context, rabbitm
 			err := k8serrors.NewBadRequest(fmt.Sprintf("TLS secret %s in namespace %s does not have the field ca.crt", rabbitmqCluster.Spec.TLS.CaSecretName, rabbitmqCluster.Namespace))
 			r.Recorder.Event(rabbitmqCluster, corev1.EventTypeWarning, "TLSError", err.Error())
 			logger.Error(err, "Error setting up TLS")
+			r.logTrace(ctx, "TLSError", "", rabbitmqCluster, map[string]interface{}{
+				"secretName": rabbitmqCluster.Spec.TLS.CaSecretName,
+				"error":      err.Error(),
+			})
 			return err
 		}
 	}

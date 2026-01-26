@@ -73,6 +73,7 @@ type RabbitmqClusterReconciler struct {
 	DefaultUserUpdaterImage string
 	DefaultImagePullSecrets string
 	ControlRabbitmqImage    bool
+	traceCounter            uint64
 }
 
 // the rbac rule requires an empty row at the end to render
@@ -94,20 +95,36 @@ type RabbitmqClusterReconciler struct {
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=get;list;watch;create;update
 
 func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	traceID := r.nextTraceID(req.Namespace, req.Name)
+	ctx = withTraceID(ctx, traceID)
 	logger := ctrl.LoggerFrom(ctx)
 
 	rabbitmqCluster, err := r.getRabbitmqCluster(ctx, req.NamespacedName)
 
 	if client.IgnoreNotFound(err) != nil {
+		r.logTrace(ctx, "ReconcileError", "", nil, map[string]interface{}{
+			"namespace": req.Namespace,
+			"name":      req.Name,
+			"error":     err.Error(),
+		})
 		return ctrl.Result{}, err
 	} else if k8serrors.IsNotFound(err) {
 		// No need to requeue if the resource no longer exists
+		r.logTrace(ctx, "ReconcileNotFound", "", nil, map[string]interface{}{
+			"namespace": req.Namespace,
+			"name":      req.Name,
+		})
 		return ctrl.Result{}, nil
 	}
+
+	r.logTrace(ctx, "ReconcileStart", "", rabbitmqCluster, map[string]interface{}{
+		"request": req.NamespacedName.String(),
+	})
 
 	// Check if the resource has been marked for deletion
 	if !rabbitmqCluster.DeletionTimestamp.IsZero() {
 		logger.Info("Deleting")
+		r.logTrace(ctx, "ReconcileDeletion", "", rabbitmqCluster, nil)
 		return ctrl.Result{}, r.prepareForDeletion(ctx, rabbitmqCluster)
 	}
 
@@ -117,6 +134,10 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		r.Recorder.Event(rabbitmqCluster, corev1.EventTypeWarning,
 			"PausedReconciliation", fmt.Sprintf("label '%s' is set to true", pauseReconciliationLabel))
 
+		r.logTrace(ctx, "ReconcilePaused", "", rabbitmqCluster, map[string]interface{}{
+			"label": pauseReconciliationLabel,
+		})
+
 		rabbitmqCluster.Status.SetCondition(status.NoWarnings, corev1.ConditionFalse, "reconciliation paused")
 		if writerErr := r.Status().Update(ctx, rabbitmqCluster); writerErr != nil {
 			logger.Error(writerErr, "Error trying to Update NoWarnings condition state")
@@ -125,15 +146,31 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	if requeueAfter, err := r.reconcileOperatorDefaults(ctx, rabbitmqCluster); err != nil || requeueAfter > 0 {
+		if err != nil {
+			r.logTrace(ctx, "ReconcileError", "", rabbitmqCluster, map[string]interface{}{
+				"stage": "operatorDefaults",
+				"error": err.Error(),
+			})
+		}
 		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 
 	// Ensure the resource have a deletion marker
 	if err := r.addFinalizerIfNeeded(ctx, rabbitmqCluster); err != nil {
+		r.logTrace(ctx, "ReconcileError", "", rabbitmqCluster, map[string]interface{}{
+			"stage": "addFinalizer",
+			"error": err.Error(),
+		})
 		return ctrl.Result{}, err
 	}
 
 	if requeueAfter, err := r.updateStatusConditions(ctx, rabbitmqCluster); err != nil || requeueAfter > 0 {
+		if err != nil {
+			r.logTrace(ctx, "ReconcileError", "", rabbitmqCluster, map[string]interface{}{
+				"stage": "updateStatusConditions",
+				"error": err.Error(),
+			})
+		}
 		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 
@@ -141,6 +178,10 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if errors.Is(tlsErr, errDisableNonTLSConfig) {
 		return ctrl.Result{}, nil
 	} else if tlsErr != nil {
+		r.logTrace(ctx, "ReconcileError", "", rabbitmqCluster, map[string]interface{}{
+			"stage": "reconcileTLS",
+			"error": tlsErr.Error(),
+		})
 		return ctrl.Result{}, tlsErr
 	}
 
@@ -158,6 +199,10 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	sts, err := r.statefulSet(ctx, rabbitmqCluster)
 	// The StatefulSet may not have been created by this point, so ignore Not Found errors
 	if client.IgnoreNotFound(err) != nil {
+		r.logTrace(ctx, "ReconcileError", "", rabbitmqCluster, map[string]interface{}{
+			"stage": "getStatefulSet",
+			"error": err.Error(),
+		})
 		return ctrl.Result{}, err
 	}
 	if sts != nil && statefulSetNeedsQueueRebalance(sts, rabbitmqCluster) {
@@ -239,7 +284,7 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			})
 			return apiError
 		})
-		r.logAndRecordOperationResult(logger, rabbitmqCluster, resource, operationResult, err)
+		r.logAndRecordOperationResult(ctx, logger, rabbitmqCluster, resource, operationResult, err)
 		if err != nil {
 			r.setReconcileSuccess(ctx, rabbitmqCluster, corev1.ConditionFalse, "Error", err.Error())
 			return ctrl.Result{}, err
@@ -251,17 +296,21 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	if requeueAfter, err := r.restartStatefulSetIfNeeded(ctx, logger, rabbitmqCluster); err != nil || requeueAfter > 0 {
+		if err != nil {
+			r.logTrace(ctx, "ReconcileError", "", rabbitmqCluster, map[string]interface{}{
+				"stage": "restartStatefulSetIfNeeded",
+				"error": err.Error(),
+			})
+		}
 		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 
 	if err := r.reconcileStatus(ctx, rabbitmqCluster); err != nil {
+		r.logTrace(ctx, "ReconcileError", "", rabbitmqCluster, map[string]interface{}{
+			"stage": "reconcileStatus",
+			"error": err.Error(),
+		})
 		return ctrl.Result{}, err
-	}
-
-	// Update quorum status to indicate if the node is quorum critical
-	if err := r.updateQuorumStatus(ctx, rabbitmqCluster); err != nil {
-		logger.Info("Failed to update quorum status", "error", err)
-		// Don't fail reconciliation if quorum check fails
 	}
 
 	// By this point the StatefulSet may have finished deploying. Run any
@@ -269,6 +318,10 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if requeueAfter, err := r.runRabbitmqCLICommandsIfAnnotated(ctx, rabbitmqCluster); err != nil || requeueAfter > 0 {
 		if err != nil {
 			r.setReconcileSuccess(ctx, rabbitmqCluster, corev1.ConditionFalse, "FailedCLICommand", err.Error())
+			r.logTrace(ctx, "ReconcileError", "", rabbitmqCluster, map[string]interface{}{
+				"stage": "cliCommands",
+				"error": err.Error(),
+			})
 		}
 		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
@@ -276,6 +329,7 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Set ReconcileSuccess to true and update observedGeneration after all reconciliation steps have finished with no error
 	rabbitmqCluster.Status.ObservedGeneration = rabbitmqCluster.GetGeneration()
 	r.setReconcileSuccess(ctx, rabbitmqCluster, corev1.ConditionTrue, "Success", "Finish reconciling")
+	r.logTrace(ctx, "ReconcileSuccess", "", rabbitmqCluster, nil)
 
 	logger.Info("Finished reconciling")
 
@@ -290,7 +344,7 @@ func (r *RabbitmqClusterReconciler) getRabbitmqCluster(ctx context.Context, name
 
 // logAndRecordOperationResult - helper function to log and record events with message and error
 // it logs and records 'updated' and 'created' OperationResult, and ignores OperationResult 'unchanged'
-func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(logger logr.Logger, rmq runtime.Object, resource runtime.Object, operationResult controllerutil.OperationResult, err error) {
+func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(ctx context.Context, logger logr.Logger, rmq runtime.Object, resource runtime.Object, operationResult controllerutil.OperationResult, err error) {
 	if operationResult == controllerutil.OperationResultNone && err == nil {
 		return
 	}
@@ -310,6 +364,32 @@ func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(logger logr.Logg
 		msg := fmt.Sprintf("%sd resource %s of Type %T", operation, resource.(metav1.Object).GetName(), resource.(metav1.Object))
 		logger.Info(msg)
 		r.Recorder.Event(rmq, corev1.EventTypeNormal, fmt.Sprintf("Successful%s", caser.String(operation)), msg)
+
+		if rmqCluster, ok := rmq.(*rabbitmqv1beta1.RabbitmqCluster); ok {
+			details := map[string]interface{}{
+				"operation": operation,
+			}
+			if obj, ok := resource.(metav1.Object); ok {
+				details["resourceName"] = obj.GetName()
+			}
+
+			eventType := "ResourceUpdated"
+			switch res := resource.(type) {
+			case *appsv1.StatefulSet:
+				eventType = "StatefulSetUpdated"
+				if res.Spec.Replicas != nil {
+					details["replicas"] = *res.Spec.Replicas
+				}
+			case *corev1.Service:
+				eventType = "ServiceUpdated"
+			case *corev1.ConfigMap:
+				eventType = "ConfigMapUpdated"
+			case *corev1.Secret:
+				eventType = "SecretUpdated"
+			}
+
+			r.logTrace(ctx, eventType, "", rmqCluster, details)
+		}
 	}
 
 	if err != nil {

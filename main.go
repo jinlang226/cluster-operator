@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/rabbitmq/cluster-operator/v2/pkg/profiling"
+	"github.com/rabbitmq/cluster-operator/v2/internal/tracelogger"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -82,6 +83,16 @@ func main() {
 	if operatorNamespace == "" {
 		log.Info("unable to find operator namespace")
 		os.Exit(1)
+	}
+
+	if tracePath := os.Getenv("TRACE_LOG_PATH"); tracePath != "" {
+		if err := tracelogger.InitTraceLogging(tracePath); err != nil {
+			log.Error(err, "unable to initialize trace logging")
+		} else {
+			defer func() {
+				_ = tracelogger.CloseTraceLogging()
+			}()
+		}
 	}
 
 	// If the environment variable is not set Getenv returns an empty string which ctrl.Options.Namespace takes to mean all namespaces should be watched

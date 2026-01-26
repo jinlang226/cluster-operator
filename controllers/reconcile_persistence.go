@@ -15,13 +15,23 @@ import (
 func (r *RabbitmqClusterReconciler) reconcilePVC(ctx context.Context, rmq *rabbitmqv1beta1.RabbitmqCluster, desiredSts *appsv1.StatefulSet) error {
 	logger := ctrl.LoggerFrom(ctx)
 	desiredCapacity := persistenceStorageCapacity(desiredSts.Spec.VolumeClaimTemplates)
+	r.logTrace(ctx, "PVCReconcileStart", "", rmq, map[string]interface{}{
+		"desiredCapacity": desiredCapacity.String(),
+	})
 	err := scaling.NewPersistenceScaler(r.Clientset).Scale(ctx, *rmq, desiredCapacity)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to scale PVCs: %s", err.Error())
 		logger.Error(fmt.Errorf("hit an error while scaling PVC capacity: %w", err), msg)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcilePersistence", msg)
+		r.logTrace(ctx, "PVCReconcileFailed", "", rmq, map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
 	}
-	return err
+	r.logTrace(ctx, "PVCReconcileSuccess", "", rmq, map[string]interface{}{
+		"desiredCapacity": desiredCapacity.String(),
+	})
+	return nil
 }
 
 func persistenceStorageCapacity(templates []corev1.PersistentVolumeClaim) k8sresource.Quantity {
