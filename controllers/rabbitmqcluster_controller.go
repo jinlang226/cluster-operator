@@ -438,7 +438,7 @@ func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(ctx context.Cont
 			}
 			if obj, ok := resource.(metav1.Object); ok {
 				details["resourceName"] = obj.GetName()
-				details["resourceKind"] = obj.GetObjectKind().GroupVersionKind().Kind
+				details["resourceKind"] = resource.GetObjectKind().GroupVersionKind().Kind
 			}
 
 			eventType := "ResourceUpdated"
@@ -482,7 +482,7 @@ func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(ctx context.Cont
 			}
 			if obj, ok := resource.(metav1.Object); ok {
 				details["resourceName"] = obj.GetName()
-				details["resourceKind"] = obj.GetObjectKind().GroupVersionKind().Kind
+				details["resourceKind"] = resource.GetObjectKind().GroupVersionKind().Kind
 			}
 			r.logTrace(ctx, "ResourceUpdateFailed", "", rmqCluster, details)
 		}
