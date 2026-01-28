@@ -21,9 +21,14 @@ const deletionFinalizer = "deletion.finalizers.rabbitmqclusters.rabbitmq.com"
 // addFinalizerIfNeeded adds a deletion finalizer if the RabbitmqCluster does not have one yet and is not marked for deletion
 func (r *RabbitmqClusterReconciler) addFinalizerIfNeeded(ctx context.Context, rabbitmqCluster *rabbitmqv1beta1.RabbitmqCluster) error {
 	if rabbitmqCluster.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(rabbitmqCluster, deletionFinalizer) {
-		return clientretry.RetryOnConflict(clientretry.DefaultRetry, func() error {
+		if err := clientretry.RetryOnConflict(clientretry.DefaultRetry, func() error {
 			controllerutil.AddFinalizer(rabbitmqCluster, deletionFinalizer)
 			return r.Update(ctx, rabbitmqCluster)
+		}); err != nil {
+			return err
+		}
+		r.logTrace(ctx, "FinalizerAdded", "", rabbitmqCluster, map[string]interface{}{
+			"finalizer": deletionFinalizer,
 		})
 	}
 	return nil
@@ -43,12 +48,16 @@ func (r *RabbitmqClusterReconciler) removeFinalizer(ctx context.Context, rabbitm
 		ctrl.LoggerFrom(ctx).Error(err, "Failed to remove finalizer for deletion")
 		return client.IgnoreNotFound(err)
 	}
+	r.logTrace(ctx, "FinalizerRemoved", "", rabbitmqCluster, map[string]interface{}{
+		"finalizer": deletionFinalizer,
+	})
 
 	return nil
 }
 
 func (r *RabbitmqClusterReconciler) prepareForDeletion(ctx context.Context, rabbitmqCluster *rabbitmqv1beta1.RabbitmqCluster) error {
 	if controllerutil.ContainsFinalizer(rabbitmqCluster, deletionFinalizer) {
+		r.logTrace(ctx, "DeletionPrepareStart", "", rabbitmqCluster, nil)
 		_ = clientretry.RetryOnConflict(clientretry.DefaultRetry, func() error {
 			return r.addRabbitmqDeletionLabel(ctx, rabbitmqCluster)
 		})
@@ -63,6 +72,7 @@ func (r *RabbitmqClusterReconciler) prepareForDeletion(ctx context.Context, rabb
 			ctrl.LoggerFrom(ctx).Error(err, "Failed to remove finalizer for deletion")
 			return err
 		}
+		r.logTrace(ctx, "DeletionPrepareComplete", "", rabbitmqCluster, nil)
 	}
 	return nil
 }
@@ -82,6 +92,15 @@ func (r *RabbitmqClusterReconciler) addRabbitmqDeletionLabel(ctx context.Context
 		return err
 	}
 
+	podNames := make([]string, 0, len(pods.Items))
+	for i := range pods.Items {
+		podNames = append(podNames, pods.Items[i].Name)
+	}
+	r.logTrace(ctx, "DeletionPodsListed", "", rabbitmqCluster, map[string]interface{}{
+		"podCount": len(pods.Items),
+		"pods":     podNames,
+	})
+
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		pod.Labels[resource.DeletionMarker] = "true"
@@ -100,7 +119,18 @@ func (r *RabbitmqClusterReconciler) checkIfLabelPropagated(ctx context.Context, 
 	stdout, _, err := r.exec(rabbitmqCluster.Namespace, podName, "rabbitmq", "sh", "-c", cmd)
 	if err != nil {
 		logger.Info("Failed to check for deletion label propagation, deleting anyway", "pod", podName, "command", cmd, "stdout", stdout)
+		r.logTrace(ctx, "DeletionLabelCheckFailed", podName, rabbitmqCluster, map[string]interface{}{
+			"command": cmd,
+			"stdout":  strings.TrimSpace(stdout),
+			"error":   err.Error(),
+		})
 		return true
 	}
-	return strings.HasPrefix(stdout, "true")
+	propagated := strings.HasPrefix(stdout, "true")
+	r.logTrace(ctx, "DeletionLabelCheck", podName, rabbitmqCluster, map[string]interface{}{
+		"command":    cmd,
+		"stdout":     strings.TrimSpace(stdout),
+		"propagated": propagated,
+	})
+	return propagated
 }

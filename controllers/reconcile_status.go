@@ -48,6 +48,18 @@ func (r *RabbitmqClusterReconciler) reconcileStatus(ctx context.Context, rmq *ra
 	}
 
 	if !reflect.DeepEqual(rmq.Status.DefaultUser, defaultUserStatus) || !reflect.DeepEqual(rmq.Status.Binding, binding) {
+		details := map[string]interface{}{
+			"defaultUserService": defaultUserStatus.ServiceReference.Name,
+			"vaultEnabled":       rmq.VaultEnabled(),
+			"externalSecretEnabled": rmq.ExternalSecretEnabled(),
+		}
+		if defaultUserStatus.SecretReference != nil {
+			details["defaultUserSecret"] = defaultUserStatus.SecretReference.Name
+		}
+		if binding != nil {
+			details["bindingSecret"] = binding.Name
+		}
+		r.logTrace(ctx, "StatusComputed", "", rmq, details)
 		rmq.Status.DefaultUser = defaultUserStatus
 		rmq.Status.Binding = binding
 		if err := r.Status().Update(ctx, rmq); err != nil {

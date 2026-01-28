@@ -38,6 +38,10 @@ func (r *RabbitmqClusterReconciler) scaleFromZeroToBeforeReplicasConfigured(ctx 
 	desiredReplicas := *sts.Spec.Replicas
 	annotationValue, ok := cluster.Annotations[beforeZeroReplicasConfigured]
 	if !ok {
+		r.logTrace(ctx, "ScaleFromZeroAnnotationMissing", "", cluster, map[string]interface{}{
+			"annotationKey": beforeZeroReplicasConfigured,
+			"desiredReplicas": desiredReplicas,
+		})
 		return false
 	}
 
@@ -46,16 +50,30 @@ func (r *RabbitmqClusterReconciler) scaleFromZeroToBeforeReplicasConfigured(ctx 
 		msg := "Failed to convert string to integer for before-zero-replicas-configuration annotation"
 		reason := "TransformErrorOperation"
 		logger.Error(errors.New(reason), msg)
+		r.logTrace(ctx, "ScaleFromZeroAnnotationParseFailed", "", cluster, map[string]interface{}{
+			"annotationKey":   beforeZeroReplicasConfigured,
+			"annotationValue": annotationValue,
+			"error":           err.Error(),
+		})
 		err = r.recordEventsAndSetCondition(ctx, cluster, status.ReconcileSuccess, corev1.ConditionFalse, corev1.EventTypeWarning, reason, msg)
 		if err != nil {
 			logger.V(1).Info(err.Error())
 		}
 		return true
 	}
+	r.logTrace(ctx, "ScaleFromZeroCheck", "", cluster, map[string]interface{}{
+		"desiredReplicas":   desiredReplicas,
+		"beforeZeroReplicas": int32(beforeZeroReplicas),
+		"annotationValue":   annotationValue,
+	})
 	if desiredReplicas != int32(beforeZeroReplicas) {
 		msg := fmt.Sprintf("Unsupported operation; when scaling from zero, you can only restore the previous number of replicas (%d)", int32(beforeZeroReplicas))
 		reason := "UnsupportedOperation"
 		logger.Error(errors.New(reason), msg)
+		r.logTrace(ctx, "ScaleFromZeroRejected", "", cluster, map[string]interface{}{
+			"desiredReplicas":   desiredReplicas,
+			"beforeZeroReplicas": int32(beforeZeroReplicas),
+		})
 		err = r.recordEventsAndSetCondition(ctx, cluster, status.ReconcileSuccess, corev1.ConditionFalse, corev1.EventTypeWarning, reason, msg)
 		if err != nil {
 			logger.V(1).Info(err.Error())
@@ -75,6 +93,9 @@ func (r *RabbitmqClusterReconciler) saveReplicasBeforeZero(ctx context.Context, 
 	reason := "ScaleDownToZero"
 	logger.Info(msg)
 	r.Recorder.Event(cluster, corev1.EventTypeNormal, reason, msg)
+	r.logTrace(ctx, "ScaleDownToZero", "", cluster, map[string]interface{}{
+		"currentReplicas": currentReplicas,
+	})
 	return r.updateAnnotation(ctx, cluster, cluster.Namespace, cluster.Name, beforeZeroReplicasConfigured, fmt.Sprint(currentReplicas))
 }
 
@@ -82,6 +103,9 @@ func (r *RabbitmqClusterReconciler) saveReplicasBeforeZero(ctx context.Context, 
 func (r *RabbitmqClusterReconciler) removeReplicasBeforeZeroAnnotationIfExists(ctx context.Context, cluster *v1beta1.RabbitmqCluster) {
 	if _, ok := cluster.Annotations[beforeZeroReplicasConfigured]; ok {
 		r.deleteAnnotation(ctx, cluster, beforeZeroReplicasConfigured)
+		r.logTrace(ctx, "ScaleFromZeroAnnotationRemoved", "", cluster, map[string]interface{}{
+			"annotationKey": beforeZeroReplicasConfigured,
+		})
 	}
 }
 

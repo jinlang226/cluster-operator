@@ -24,14 +24,42 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 	if !allReplicasReadyAndUpdated(sts) {
 		logger.V(1).Info("not all replicas ready yet; requeuing request to run RabbitMQ CLI commands")
 		r.logTrace(ctx, "CLICommandsDeferred", "", rmq, map[string]interface{}{
-			"reason": "notReady",
+			"reason":          "notReady",
+			"specReplicas":    derefReplicas(sts.Spec.Replicas),
+			"readyReplicas":   sts.Status.ReadyReplicas,
+			"availableReplicas": sts.Status.AvailableReplicas,
+			"currentReplicas": sts.Status.CurrentReplicas,
+			"updatedReplicas": sts.Status.UpdatedReplicas,
+			"currentRevision": sts.Status.CurrentRevision,
+			"updateRevision":  sts.Status.UpdateRevision,
+			"beingUpdated":    statefulSetBeingUpdated(sts),
 		})
 		return 15 * time.Second, nil
 	}
+	r.logTrace(ctx, "CLICommandsReady", "", rmq, map[string]interface{}{
+		"specReplicas":    derefReplicas(sts.Spec.Replicas),
+		"readyReplicas":   sts.Status.ReadyReplicas,
+		"availableReplicas": sts.Status.AvailableReplicas,
+		"currentReplicas": sts.Status.CurrentReplicas,
+		"updatedReplicas": sts.Status.UpdatedReplicas,
+		"currentRevision": sts.Status.CurrentRevision,
+		"updateRevision":  sts.Status.UpdateRevision,
+		"beingUpdated":    statefulSetBeingUpdated(sts),
+	})
 	// Retrieve the plugins config map, if it exists.
 	pluginsConfig, err := r.configMap(ctx, rmq, rmq.ChildResourceName(resource.PluginsConfigName))
 	if client.IgnoreNotFound(err) != nil {
 		return 0, err
+	}
+	pluginsUpdatedAt := ""
+	if pluginsConfig != nil && pluginsConfig.Annotations != nil {
+		pluginsUpdatedAt = pluginsConfig.Annotations[pluginsUpdateAnnotation]
+	}
+	if pluginsConfig != nil {
+		r.logTrace(ctx, "PluginsConfigObserved", "", rmq, map[string]interface{}{
+			"configMap":        pluginsConfig.Name,
+			"pluginsUpdatedAt": pluginsUpdatedAt,
+		})
 	}
 	updatedRecently, err := pluginsConfigUpdatedRecently(pluginsConfig)
 	if err != nil {
@@ -43,7 +71,9 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 		// otherwise, there would be race conditions where we exec into containers losing the connection due to pods being terminated
 		logger.V(1).Info("requeuing request to set plugins")
 		r.logTrace(ctx, "CLICommandsDeferred", "", rmq, map[string]interface{}{
-			"reason": "pluginsConfigUpdatedRecently",
+			"reason":           "pluginsConfigUpdatedRecently",
+			"configMap":        pluginsConfig.Name,
+			"pluginsUpdatedAt": pluginsUpdatedAt,
 		})
 		return 2 * time.Second, nil
 	}
@@ -85,6 +115,7 @@ func (r *RabbitmqClusterReconciler) runEnableFeatureFlagsCommand(ctx context.Con
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
 		r.logTrace(ctx, "EnableFeatureFlagsFailed", podName, rmq, map[string]interface{}{
 			"command": cmd,
+			"success": false,
 			"error":   err.Error(),
 		})
 		return fmt.Errorf("%s %s: %w", msg, podName, err)
@@ -92,6 +123,7 @@ func (r *RabbitmqClusterReconciler) runEnableFeatureFlagsCommand(ctx context.Con
 	logger.Info("successfully enabled all feature flags")
 	r.logTrace(ctx, "FeatureFlagsEnabled", podName, rmq, map[string]interface{}{
 		"command": cmd,
+		"success": true,
 	})
 	return r.deleteAnnotation(ctx, sts, stsCreateAnnotation)
 }
@@ -116,12 +148,14 @@ func (r *RabbitmqClusterReconciler) runSetPluginsCommand(ctx context.Context, rm
 			r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
 			r.logTrace(ctx, "SetPluginsFailed", podName, rmq, map[string]interface{}{
 				"command": cmd,
+				"success": false,
 				"error":   err.Error(),
 			})
 			return fmt.Errorf("%s %s: %w", msg, podName, err)
 		}
 		r.logTrace(ctx, "SetPlugins", podName, rmq, map[string]interface{}{
 			"command": cmd,
+			"success": true,
 		})
 	}
 	logger.Info("successfully set plugins")
@@ -142,6 +176,7 @@ func (r *RabbitmqClusterReconciler) runQueueRebalanceCommand(ctx context.Context
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
 		r.logTrace(ctx, "QueueRebalanceFailed", podName, rmq, map[string]interface{}{
 			"command": cmd,
+			"success": false,
 			"error":   err.Error(),
 		})
 		return fmt.Errorf("%s %s: %w", msg, podName, err)
@@ -149,8 +184,16 @@ func (r *RabbitmqClusterReconciler) runQueueRebalanceCommand(ctx context.Context
 	logger.Info("successfully rebalanced queues")
 	r.logTrace(ctx, "QueueRebalance", podName, rmq, map[string]interface{}{
 		"command": cmd,
+		"success": true,
 	})
 	return r.deleteAnnotation(ctx, rmq, queueRebalanceAnnotation)
+}
+
+func derefReplicas(replicas *int32) int32 {
+	if replicas == nil {
+		return 0
+	}
+	return *replicas
 }
 
 func statefulSetNeedsQueueRebalance(sts *appsv1.StatefulSet, rmq *rabbitmqv1beta1.RabbitmqCluster) bool {

@@ -32,6 +32,7 @@ func (r *RabbitmqClusterReconciler) annotateIfNeeded(ctx context.Context, logger
 		obj           client.Object
 		objName       string
 		annotationKey string
+		resourceKind  string
 	)
 
 	switch b := builder.(type) {
@@ -43,6 +44,7 @@ func (r *RabbitmqClusterReconciler) annotateIfNeeded(ctx context.Context, logger
 		obj = &corev1.ConfigMap{}
 		objName = rmq.ChildResourceName(resource.PluginsConfigName)
 		annotationKey = pluginsUpdateAnnotation
+		resourceKind = "ConfigMap"
 
 	case *resource.ServerConfigMapBuilder:
 		if operationResult != controllerutil.OperationResultUpdated || !b.UpdateRequiresStsRestart {
@@ -51,6 +53,7 @@ func (r *RabbitmqClusterReconciler) annotateIfNeeded(ctx context.Context, logger
 		obj = &corev1.ConfigMap{}
 		objName = rmq.ChildResourceName(resource.ServerConfigMapName)
 		annotationKey = serverConfAnnotation
+		resourceKind = "ConfigMap"
 
 	case *resource.StatefulSetBuilder:
 		if operationResult != controllerutil.OperationResultCreated {
@@ -59,12 +62,14 @@ func (r *RabbitmqClusterReconciler) annotateIfNeeded(ctx context.Context, logger
 		obj = &appsv1.StatefulSet{}
 		objName = rmq.ChildResourceName("server")
 		annotationKey = stsCreateAnnotation
+		resourceKind = "StatefulSet"
 
 	default:
 		return nil
 	}
 
-	if err := r.updateAnnotation(ctx, obj, rmq.Namespace, objName, annotationKey, time.Now().Format(time.RFC3339)); err != nil {
+	annotationValue := time.Now().Format(time.RFC3339)
+	if err := r.updateAnnotation(ctx, obj, rmq.Namespace, objName, annotationKey, annotationValue); err != nil {
 		msg := "failed to annotate " + objName
 		logger.Error(err, msg)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedUpdate", msg)
@@ -72,6 +77,12 @@ func (r *RabbitmqClusterReconciler) annotateIfNeeded(ctx context.Context, logger
 	}
 
 	logger.Info("successfully annotated")
+	r.logTrace(ctx, "ResourceAnnotated", "", rmq, map[string]interface{}{
+		"resourceName":   objName,
+		"resourceKind":   resourceKind,
+		"annotationKey":  annotationKey,
+		"annotationValue": annotationValue,
+	})
 	return nil
 }
 
@@ -82,10 +93,18 @@ func (r *RabbitmqClusterReconciler) restartStatefulSetIfNeeded(ctx context.Conte
 	serverConf, err := r.configMap(ctx, rmq, rmq.ChildResourceName(resource.ServerConfigMapName))
 	if err != nil {
 		// requeue request after 10s if unable to find server-conf configmap, else return the error
+		r.logTrace(ctx, "ServerConfigNotFound", "", rmq, map[string]interface{}{
+			"error": err.Error(),
+		})
 		return 10 * time.Second, client.IgnoreNotFound(err)
 	}
 
 	serverConfigUpdatedAt, ok := serverConf.Annotations[serverConfAnnotation]
+	r.logTrace(ctx, "ServerConfigObserved", "", rmq, map[string]interface{}{
+		"configMap":           serverConf.Name,
+		"hasUpdateAnnotation": ok,
+		"updatedAt":           serverConfigUpdatedAt,
+	})
 	if !ok {
 		// server-conf configmap hasn't been updated; no need to restart sts
 		return 0, nil
@@ -94,12 +113,27 @@ func (r *RabbitmqClusterReconciler) restartStatefulSetIfNeeded(ctx context.Conte
 	sts, err := r.statefulSet(ctx, rmq)
 	if err != nil {
 		// requeue request after 10s if unable to find sts, else return the error
+		r.logTrace(ctx, "StatefulSetRestartCheckFailed", "", rmq, map[string]interface{}{
+			"error": err.Error(),
+		})
 		return 10 * time.Second, client.IgnoreNotFound(err)
 	}
 
 	stsRestartedAt, ok := sts.Spec.Template.Annotations[stsRestartAnnotation]
+	r.logTrace(ctx, "StatefulSetRestartCheck", "", rmq, map[string]interface{}{
+		"statefulSet":         sts.Name,
+		"serverConfigUpdatedAt": serverConfigUpdatedAt,
+		"stsRestartedAt":      stsRestartedAt,
+		"hasRestartAnnotation": ok,
+	})
 	if ok && stsRestartedAt > serverConfigUpdatedAt {
 		// sts was updated after the last server-conf configmap update; no need to restart sts
+		r.logTrace(ctx, "StatefulSetRestartSkipped", "", rmq, map[string]interface{}{
+			"statefulSet":         sts.Name,
+			"serverConfigUpdatedAt": serverConfigUpdatedAt,
+			"stsRestartedAt":      stsRestartedAt,
+			"reason":              "alreadyRestarted",
+		})
 		return 0, nil
 	}
 
@@ -117,6 +151,10 @@ func (r *RabbitmqClusterReconciler) restartStatefulSetIfNeeded(ctx context.Conte
 		msg := fmt.Sprintf("failed to restart StatefulSet %s; rabbitmq.conf configuration may be outdated", rmq.ChildResourceName("server"))
 		logger.Error(err, msg)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedUpdate", msg)
+		r.logTrace(ctx, "StatefulSetRestartFailed", "", rmq, map[string]interface{}{
+			"statefulSet": rmq.ChildResourceName("server"),
+			"error":       err.Error(),
+		})
 		// failed to restart sts; return error to requeue request
 		return 0, err
 	}
@@ -124,6 +162,10 @@ func (r *RabbitmqClusterReconciler) restartStatefulSetIfNeeded(ctx context.Conte
 	msg := fmt.Sprintf("restarted StatefulSet %s", rmq.ChildResourceName("server"))
 	logger.Info(msg)
 	r.Recorder.Event(rmq, corev1.EventTypeNormal, "SuccessfulUpdate", msg)
+	r.logTrace(ctx, "StatefulSetRestartTriggered", "", rmq, map[string]interface{}{
+		"statefulSet":         rmq.ChildResourceName("server"),
+		"serverConfigUpdatedAt": serverConfigUpdatedAt,
+	})
 
 	return 0, nil
 }

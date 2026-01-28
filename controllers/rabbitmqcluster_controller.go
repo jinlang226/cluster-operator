@@ -120,6 +120,47 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	r.logTrace(ctx, "ReconcileStart", "", rabbitmqCluster, map[string]interface{}{
 		"request": req.NamespacedName.String(),
 	})
+	specDetails := map[string]interface{}{
+		"specReplicas":              derefReplicas(rabbitmqCluster.Spec.Replicas),
+		"image":                     rabbitmqCluster.Spec.Image,
+		"serviceType":               string(rabbitmqCluster.Spec.Service.Type),
+		"skipPostDeploySteps":       rabbitmqCluster.Spec.SkipPostDeploySteps,
+		"autoEnableAllFeatureFlags": rabbitmqCluster.Spec.AutoEnableAllFeatureFlags,
+		"disableNonTLSListeners":    rabbitmqCluster.DisableNonTLSListeners(),
+		"tlsEnabled":                rabbitmqCluster.TLSEnabled(),
+		"secretTLSEnabled":          rabbitmqCluster.SecretTLSEnabled(),
+		"mutualTLSEnabled":          rabbitmqCluster.MutualTLSEnabled(),
+		"vaultEnabled":              rabbitmqCluster.VaultEnabled(),
+		"externalSecretEnabled":     rabbitmqCluster.ExternalSecretEnabled(),
+	}
+	if rabbitmqCluster.Spec.Persistence.Storage != nil {
+		specDetails["persistenceStorage"] = rabbitmqCluster.Spec.Persistence.Storage.String()
+	}
+	if rabbitmqCluster.Spec.Persistence.StorageClassName != nil {
+		specDetails["persistenceStorageClass"] = *rabbitmqCluster.Spec.Persistence.StorageClassName
+	}
+	if rabbitmqCluster.Spec.Persistence.EmptyDir != nil {
+		specDetails["persistenceEmptyDirMedium"] = string(rabbitmqCluster.Spec.Persistence.EmptyDir.Medium)
+		if rabbitmqCluster.Spec.Persistence.EmptyDir.SizeLimit != nil {
+			specDetails["persistenceEmptyDirSizeLimit"] = rabbitmqCluster.Spec.Persistence.EmptyDir.SizeLimit.String()
+		}
+	}
+	if rabbitmqCluster.Spec.TerminationGracePeriodSeconds != nil {
+		specDetails["terminationGracePeriodSeconds"] = *rabbitmqCluster.Spec.TerminationGracePeriodSeconds
+	}
+	if rabbitmqCluster.Spec.DelayStartSeconds != nil {
+		specDetails["delayStartSeconds"] = *rabbitmqCluster.Spec.DelayStartSeconds
+	}
+	if rabbitmqCluster.Spec.TLS.SecretName != "" {
+		specDetails["tlsSecretName"] = rabbitmqCluster.Spec.TLS.SecretName
+	}
+	if rabbitmqCluster.Spec.TLS.CaSecretName != "" {
+		specDetails["tlsCaSecretName"] = rabbitmqCluster.Spec.TLS.CaSecretName
+	}
+	if len(rabbitmqCluster.Spec.Rabbitmq.AdditionalPlugins) > 0 {
+		specDetails["additionalPlugins"] = rabbitmqCluster.Spec.Rabbitmq.AdditionalPlugins
+	}
+	r.logTrace(ctx, "SpecObserved", "", rabbitmqCluster, specDetails)
 
 	// Check if the resource has been marked for deletion
 	if !rabbitmqCluster.DeletionTimestamp.IsZero() {
@@ -205,7 +246,33 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		})
 		return ctrl.Result{}, err
 	}
+	if sts != nil {
+		details := map[string]interface{}{
+			"resourceName":      sts.Name,
+			"statusReplicas":    sts.Status.Replicas,
+			"currentReplicas":   sts.Status.CurrentReplicas,
+			"readyReplicas":     sts.Status.ReadyReplicas,
+			"availableReplicas": sts.Status.AvailableReplicas,
+			"updatedReplicas":   sts.Status.UpdatedReplicas,
+			"currentRevision":   sts.Status.CurrentRevision,
+			"updateRevision":    sts.Status.UpdateRevision,
+			"resourceVersion":   sts.ResourceVersion,
+		}
+		if sts.Spec.Replicas != nil {
+			details["specReplicas"] = *sts.Spec.Replicas
+		}
+		r.logTrace(ctx, "StatefulSetStatusObserved", "", rabbitmqCluster, details)
+	} else if k8serrors.IsNotFound(err) {
+		r.logTrace(ctx, "StatefulSetNotFound", "", rabbitmqCluster, map[string]interface{}{
+			"resourceName": rabbitmqCluster.ChildResourceName("server"),
+		})
+	}
 	if sts != nil && statefulSetNeedsQueueRebalance(sts, rabbitmqCluster) {
+		r.logTrace(ctx, "QueueRebalanceNeeded", "", rabbitmqCluster, map[string]interface{}{
+			"reason":          "statefulSetBeingUpdated",
+			"currentRevision": sts.Status.CurrentRevision,
+			"updateRevision":  sts.Status.UpdateRevision,
+		})
 		if err := r.markForQueueRebalance(ctx, rabbitmqCluster); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -371,22 +438,30 @@ func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(ctx context.Cont
 			}
 			if obj, ok := resource.(metav1.Object); ok {
 				details["resourceName"] = obj.GetName()
+				details["resourceKind"] = obj.GetObjectKind().GroupVersionKind().Kind
 			}
 
 			eventType := "ResourceUpdated"
-			switch res := resource.(type) {
-			case *appsv1.StatefulSet:
-				eventType = "StatefulSetUpdated"
-				if res.Spec.Replicas != nil {
-					details["replicas"] = *res.Spec.Replicas
-				}
-			case *corev1.Service:
-				eventType = "ServiceUpdated"
-			case *corev1.ConfigMap:
-				eventType = "ConfigMapUpdated"
-			case *corev1.Secret:
-				eventType = "SecretUpdated"
+		switch res := resource.(type) {
+		case *appsv1.StatefulSet:
+			eventType = "StatefulSetUpdated"
+			if res.Spec.Replicas != nil {
+				details["replicas"] = *res.Spec.Replicas
 			}
+		case *corev1.Service:
+			eventType = "ServiceUpdated"
+			details["serviceType"] = string(res.Spec.Type)
+			if res.Spec.ClusterIP != "" {
+				details["clusterIP"] = res.Spec.ClusterIP
+			}
+			if len(res.Spec.ClusterIPs) > 0 {
+				details["clusterIPs"] = res.Spec.ClusterIPs
+			}
+		case *corev1.ConfigMap:
+			eventType = "ConfigMapUpdated"
+		case *corev1.Secret:
+			eventType = "SecretUpdated"
+		}
 
 			r.logTrace(ctx, eventType, "", rmqCluster, details)
 		}
@@ -400,6 +475,17 @@ func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(ctx context.Cont
 		msg = fmt.Sprintf("%s%s", msg, err)
 		logger.Error(err, msg)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, fmt.Sprintf("Failed%s", caser.String(operation)), msg)
+		if rmqCluster, ok := rmq.(*rabbitmqv1beta1.RabbitmqCluster); ok {
+			details := map[string]interface{}{
+				"operation": operation,
+				"error":     err.Error(),
+			}
+			if obj, ok := resource.(metav1.Object); ok {
+				details["resourceName"] = obj.GetName()
+				details["resourceKind"] = obj.GetObjectKind().GroupVersionKind().Kind
+			}
+			r.logTrace(ctx, "ResourceUpdateFailed", "", rmqCluster, details)
+		}
 	}
 }
 
@@ -453,11 +539,41 @@ func (r *RabbitmqClusterReconciler) getChildResources(ctx context.Context, rmq *
 	}
 
 	if err := r.List(ctx, endpointSliceList, &listOptions); err != nil {
+		r.logTrace(ctx, "EndpointSliceListFailed", "", rmq, map[string]interface{}{
+			"error": err.Error(),
+		})
 		return nil, err
 	} else if len(endpointSliceList.Items) == 0 {
 		endpointSlice = nil
 	} else {
 		endpointSlice = &endpointSliceList.Items[0]
+	}
+	if endpointSlice != nil {
+		readyCount := 0
+		notReadyCount := 0
+		unknownCount := 0
+		for _, ep := range endpointSlice.Endpoints {
+			if ep.Conditions.Ready == nil {
+				unknownCount++
+				continue
+			}
+			if *ep.Conditions.Ready {
+				readyCount++
+			} else {
+				notReadyCount++
+			}
+		}
+		r.logTrace(ctx, "EndpointSliceObserved", "", rmq, map[string]interface{}{
+			"name":                  endpointSlice.Name,
+			"totalEndpoints":        len(endpointSlice.Endpoints),
+			"readyEndpoints":        readyCount,
+			"notReadyEndpoints":     notReadyCount,
+			"unknownReadyEndpoints": unknownCount,
+		})
+	} else {
+		r.logTrace(ctx, "EndpointSliceNotFound", "", rmq, map[string]interface{}{
+			"serviceName": rmq.Name,
+		})
 	}
 
 	return []runtime.Object{sts, endpointSlice}, nil
