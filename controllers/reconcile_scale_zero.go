@@ -46,6 +46,12 @@ func (r *RabbitmqClusterReconciler) scaleFromZeroToBeforeReplicasConfigured(ctx 
 		msg := "Failed to convert string to integer for before-zero-replicas-configuration annotation"
 		reason := "TransformErrorOperation"
 		logger.Error(errors.New(reason), msg)
+		emitTraceEvent(ctx, logger, "StatefulSetStatusObserved", map[string]any{
+			"phase":                 "scaleFromZero",
+			"reason":                reason,
+			"annotationParseFailed": true,
+			"annotationValue":       annotationValue,
+		}, "")
 		err = r.recordEventsAndSetCondition(ctx, cluster, status.ReconcileSuccess, corev1.ConditionFalse, corev1.EventTypeWarning, reason, msg)
 		if err != nil {
 			logger.V(1).Info(err.Error())
@@ -56,6 +62,13 @@ func (r *RabbitmqClusterReconciler) scaleFromZeroToBeforeReplicasConfigured(ctx 
 		msg := fmt.Sprintf("Unsupported operation; when scaling from zero, you can only restore the previous number of replicas (%d)", int32(beforeZeroReplicas))
 		reason := "UnsupportedOperation"
 		logger.Error(errors.New(reason), msg)
+		emitTraceEvent(ctx, logger, "StatefulSetStatusObserved", map[string]any{
+			"phase":               "scaleFromZero",
+			"reason":              reason,
+			"desiredReplicas":     desiredReplicas,
+			"beforeZeroReplicas":  int32(beforeZeroReplicas),
+			"scaleFromZeroDenied": true,
+		}, "")
 		err = r.recordEventsAndSetCondition(ctx, cluster, status.ReconcileSuccess, corev1.ConditionFalse, corev1.EventTypeWarning, reason, msg)
 		if err != nil {
 			logger.V(1).Info(err.Error())
@@ -75,12 +88,22 @@ func (r *RabbitmqClusterReconciler) saveReplicasBeforeZero(ctx context.Context, 
 	reason := "ScaleDownToZero"
 	logger.Info(msg)
 	r.Recorder.Event(cluster, corev1.EventTypeNormal, reason, msg)
+	emitTraceEvent(ctx, logger, "StatefulSetStatusObserved", map[string]any{
+		"phase":              "scaleToZero",
+		"currentReplicas":    currentReplicas,
+		"replicasBeforeZero": currentReplicas,
+	}, "")
 	return r.updateAnnotation(ctx, cluster, cluster.Namespace, cluster.Name, beforeZeroReplicasConfigured, fmt.Sprint(currentReplicas))
 }
 
 // If the annotation rabbitmq.com/before-zero-replicas-configured exists it will be deleted.
 func (r *RabbitmqClusterReconciler) removeReplicasBeforeZeroAnnotationIfExists(ctx context.Context, cluster *v1beta1.RabbitmqCluster) {
 	if _, ok := cluster.Annotations[beforeZeroReplicasConfigured]; ok {
+		logger := ctrl.LoggerFrom(ctx)
+		emitTraceEvent(ctx, logger, "StatefulSetStatusObserved", map[string]any{
+			"phase":                 "scaleFromZero",
+			"replicasBeforeZeroCleared": true,
+		}, "")
 		r.deleteAnnotation(ctx, cluster, beforeZeroReplicasConfigured)
 	}
 }

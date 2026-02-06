@@ -124,6 +124,27 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
+	specSnapshot := modelSpecFromCluster(rabbitmqCluster)
+	trace := newTraceState(rabbitmqCluster, specSnapshot)
+	ctx = withTrace(ctx, trace)
+	specAnnotations := map[string]string{}
+	if rabbitmqCluster.Annotations != nil {
+		if v, ok := rabbitmqCluster.Annotations[queueRebalanceAnnotation]; ok {
+			specAnnotations[queueRebalanceAnnotation] = v
+		}
+		if v, ok := rabbitmqCluster.Annotations[beforeZeroReplicasConfigured]; ok {
+			specAnnotations[beforeZeroReplicasConfigured] = v
+		}
+	}
+	emitTraceEvent(ctx, logger, "ReconcileStart", map[string]any{
+		"spec":        specSnapshot,
+		"annotations": specAnnotations,
+	}, "")
+	emitTraceEvent(ctx, logger, "SpecObserved", map[string]any{
+		"spec":        specSnapshot,
+		"annotations": specAnnotations,
+	}, "")
+
 	if requeueAfter, err := r.reconcileOperatorDefaults(ctx, rabbitmqCluster); err != nil || requeueAfter > 0 {
 		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
@@ -157,13 +178,43 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	sts, err := r.statefulSet(ctx, rabbitmqCluster)
 	// The StatefulSet may not have been created by this point, so ignore Not Found errors
+	if err != nil && k8serrors.IsNotFound(err) {
+		emitTraceEvent(ctx, logger, "StatefulSetNotFound", map[string]any{
+			"phase": "queueRebalanceCheck",
+		}, "")
+	}
 	if client.IgnoreNotFound(err) != nil {
 		return ctrl.Result{}, err
+	}
+	if err == nil && sts != nil {
+		emitTraceEvent(ctx, logger, "StatefulSetStatusObserved", statefulSetStatusDetails(
+			sts.Name,
+			sts.Namespace,
+			filterAnnotations(sts.Annotations, stsCreateAnnotation),
+			filterAnnotations(sts.Spec.Template.Annotations, stsRestartAnnotation),
+			sts.Spec.Replicas,
+			sts.Status.Replicas,
+			sts.Status.ReadyReplicas,
+			sts.Status.AvailableReplicas,
+			sts.Status.CurrentReplicas,
+			sts.Status.UpdatedReplicas,
+			sts.Status.CurrentRevision,
+			sts.Status.UpdateRevision,
+		), "")
 	}
 	if sts != nil && statefulSetNeedsQueueRebalance(sts, rabbitmqCluster) {
 		if err := r.markForQueueRebalance(ctx, rabbitmqCluster); err != nil {
 			return ctrl.Result{}, err
 		}
+		queueAnnotations := map[string]string{}
+		if rabbitmqCluster.Annotations != nil {
+			if v, ok := rabbitmqCluster.Annotations[queueRebalanceAnnotation]; ok {
+				queueAnnotations[queueRebalanceAnnotation] = v
+			}
+		}
+		emitTraceEvent(ctx, logger, "QueueRebalanceNeeded", map[string]any{
+			"annotations": queueAnnotations,
+		}, "")
 	}
 
 	logger.Info("Start reconciling")
@@ -239,7 +290,7 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			})
 			return apiError
 		})
-		r.logAndRecordOperationResult(logger, rabbitmqCluster, resource, operationResult, err)
+		r.logAndRecordOperationResult(ctx, logger, rabbitmqCluster, resource, operationResult, err)
 		if err != nil {
 			r.setReconcileSuccess(ctx, rabbitmqCluster, corev1.ConditionFalse, "Error", err.Error())
 			return ctrl.Result{}, err
@@ -290,7 +341,7 @@ func (r *RabbitmqClusterReconciler) getRabbitmqCluster(ctx context.Context, name
 
 // logAndRecordOperationResult - helper function to log and record events with message and error
 // it logs and records 'updated' and 'created' OperationResult, and ignores OperationResult 'unchanged'
-func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(logger logr.Logger, rmq runtime.Object, resource runtime.Object, operationResult controllerutil.OperationResult, err error) {
+func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(ctx context.Context, logger logr.Logger, rmq runtime.Object, resource runtime.Object, operationResult controllerutil.OperationResult, err error) {
 	if operationResult == controllerutil.OperationResultNone && err == nil {
 		return
 	}
@@ -310,6 +361,43 @@ func (r *RabbitmqClusterReconciler) logAndRecordOperationResult(logger logr.Logg
 		msg := fmt.Sprintf("%sd resource %s of Type %T", operation, resource.(metav1.Object).GetName(), resource.(metav1.Object))
 		logger.Info(msg)
 		r.Recorder.Event(rmq, corev1.EventTypeNormal, fmt.Sprintf("Successful%s", caser.String(operation)), msg)
+
+		if operationResult == controllerutil.OperationResultCreated || operationResult == controllerutil.OperationResultUpdated {
+			traceDetails := map[string]any{
+				"resourceName": resource.(metav1.Object).GetName(),
+				"operation":    operation,
+			}
+			switch obj := resource.(type) {
+			case *appsv1.StatefulSet:
+				replicas := int32(0)
+				if obj.Spec.Replicas != nil {
+					replicas = *obj.Spec.Replicas
+				}
+				traceDetails["stsSpecReplicas"] = replicas
+				traceDetails["replicas"] = replicas
+				traceDetails["stsAnnotations"] = filterAnnotations(obj.Annotations, stsCreateAnnotation)
+				traceDetails["podTemplateAnnotations"] = filterAnnotations(obj.Spec.Template.Annotations, stsRestartAnnotation)
+				emitTraceEvent(ctx, logger, "StatefulSetUpdated", traceDetails, "")
+			case *corev1.Service:
+				emitTraceEvent(ctx, logger, "ServiceUpdated", traceDetails, "")
+			case *corev1.Secret:
+				emitTraceEvent(ctx, logger, "SecretUpdated", traceDetails, "")
+			case *corev1.ConfigMap:
+				if obj.Data != nil {
+					if enabledPlugins, ok := obj.Data["enabled_plugins"]; ok {
+						traceDetails["enabledPlugins"] = enabledPlugins
+					}
+					traceDetails["dataKeys"] = keysOfStringMap(obj.Data)
+				}
+				emitTraceEvent(ctx, logger, "ConfigMapUpdated", traceDetails, "")
+			case *corev1.ServiceAccount:
+				emitTraceEvent(ctx, logger, "ServiceAccountUpdated", traceDetails, "")
+			case *rbacv1.Role:
+				emitTraceEvent(ctx, logger, "RoleUpdated", traceDetails, "")
+			case *rbacv1.RoleBinding:
+				emitTraceEvent(ctx, logger, "RoleBindingUpdated", traceDetails, "")
+			}
+		}
 	}
 
 	if err != nil {
@@ -385,6 +473,18 @@ func (r *RabbitmqClusterReconciler) getChildResources(ctx context.Context, rmq *
 
 func (r *RabbitmqClusterReconciler) setReconcileSuccess(ctx context.Context, rabbitmqCluster *rabbitmqv1beta1.RabbitmqCluster, condition corev1.ConditionStatus, reason, msg string) {
 	rabbitmqCluster.Status.SetCondition(status.ReconcileSuccess, condition, reason, msg)
+	switch condition {
+	case corev1.ConditionTrue:
+		emitTraceEvent(ctx, ctrl.LoggerFrom(ctx), "ReconcileSuccess", map[string]any{
+			"reason":  reason,
+			"message": msg,
+		}, "")
+	case corev1.ConditionFalse:
+		emitTraceEvent(ctx, ctrl.LoggerFrom(ctx), "ReconcileFailed", map[string]any{
+			"reason":  reason,
+			"message": msg,
+		}, "")
+	}
 	if writerErr := r.Status().Update(ctx, rabbitmqCluster); writerErr != nil {
 		ctrl.LoggerFrom(ctx).Error(writerErr, "Failed to update Custom Resource status",
 			"namespace", rabbitmqCluster.Namespace,

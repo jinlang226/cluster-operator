@@ -9,6 +9,7 @@ import (
 	"github.com/rabbitmq/cluster-operator/v2/internal/resource"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -19,30 +20,108 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 	logger := ctrl.LoggerFrom(ctx)
 	sts, err := r.statefulSet(ctx, rmq)
 	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			emitTraceEvent(ctx, logger, "StatefulSetNotFound", map[string]any{
+				"phase": "cliCommands",
+			}, "")
+		}
+		emitTraceEvent(ctx, logger, "CLIConditionsObserved", map[string]any{
+			"cliStsFound":                      false,
+			"cliStsReady":                      false,
+			"cliPluginsConfigUpdatedRecently":  false,
+			"cliPluginsUpdateAnnotationPresent": false,
+			"cliStsCreateAnnotationPresent":    false,
+			"cliQueueRebalanceAnnotationPresent": rmq.Annotations != nil && rmq.Annotations[queueRebalanceAnnotation] != "",
+		}, "")
 		return 0, err
 	}
 	if !allReplicasReadyAndUpdated(sts) {
 		logger.V(1).Info("not all replicas ready yet; requeuing request to run RabbitMQ CLI commands")
+		emitTraceEvent(ctx, logger, "CLIConditionsObserved", map[string]any{
+			"cliStsFound":                      true,
+			"cliStsReady":                      false,
+			"cliPluginsConfigUpdatedRecently":  false,
+			"cliPluginsUpdateAnnotationPresent": false,
+			"cliStsCreateAnnotationPresent":    sts.Annotations != nil && sts.Annotations[stsCreateAnnotation] != "",
+			"cliQueueRebalanceAnnotationPresent": rmq.Annotations != nil && rmq.Annotations[queueRebalanceAnnotation] != "",
+		}, "")
+		emitTraceEvent(ctx, logger, "CLICommandsDeferred", map[string]any{
+			"reason": "statefulSetNotReady",
+			"stsStatus": statefulSetStatusDetails(
+				sts.Name,
+				sts.Namespace,
+				filterAnnotations(sts.Annotations, stsCreateAnnotation),
+				filterAnnotations(sts.Spec.Template.Annotations, stsRestartAnnotation),
+				sts.Spec.Replicas,
+				sts.Status.Replicas,
+				sts.Status.ReadyReplicas,
+				sts.Status.AvailableReplicas,
+				sts.Status.CurrentReplicas,
+				sts.Status.UpdatedReplicas,
+				sts.Status.CurrentRevision,
+				sts.Status.UpdateRevision,
+			),
+		}, "")
 		return 15 * time.Second, nil
 	}
+	emitTraceEvent(ctx, logger, "CLICommandsReady", map[string]any{
+		"stsStatus": statefulSetStatusDetails(
+			sts.Name,
+			sts.Namespace,
+			filterAnnotations(sts.Annotations, stsCreateAnnotation),
+			filterAnnotations(sts.Spec.Template.Annotations, stsRestartAnnotation),
+			sts.Spec.Replicas,
+			sts.Status.Replicas,
+			sts.Status.ReadyReplicas,
+			sts.Status.AvailableReplicas,
+			sts.Status.CurrentReplicas,
+			sts.Status.UpdatedReplicas,
+			sts.Status.CurrentRevision,
+			sts.Status.UpdateRevision,
+		),
+	}, "")
 	// Retrieve the plugins config map, if it exists.
 	pluginsConfig, err := r.configMap(ctx, rmq, rmq.ChildResourceName(resource.PluginsConfigName))
 	if client.IgnoreNotFound(err) != nil {
 		return 0, err
 	}
-	updatedRecently, err := pluginsConfigUpdatedRecently(pluginsConfig)
-	if err != nil {
-		return 0, err
+	pluginsUpdateAnnotationPresent := false
+	if pluginsConfig != nil && pluginsConfig.Annotations != nil && pluginsConfig.Annotations[pluginsUpdateAnnotation] != "" {
+		pluginsUpdateAnnotationPresent = true
 	}
+	updatedRecently := false
+	if pluginsConfig != nil {
+		updatedRecently, err = pluginsConfigUpdatedRecently(pluginsConfig)
+		if err != nil {
+			return 0, err
+		}
+	}
+	emitTraceEvent(ctx, logger, "CLIConditionsObserved", map[string]any{
+		"cliStsFound":                      true,
+		"cliStsReady":                      true,
+		"cliPluginsConfigUpdatedRecently":  updatedRecently,
+		"cliPluginsUpdateAnnotationPresent": pluginsUpdateAnnotationPresent,
+		"cliStsCreateAnnotationPresent":    sts.Annotations != nil && sts.Annotations[stsCreateAnnotation] != "",
+		"cliQueueRebalanceAnnotationPresent": rmq.Annotations != nil && rmq.Annotations[queueRebalanceAnnotation] != "",
+	}, "")
 	if updatedRecently {
 		// plugins configMap was updated very recently
 		// give StatefulSet controller some time to trigger restart of StatefulSet if necessary
 		// otherwise, there would be race conditions where we exec into containers losing the connection due to pods being terminated
 		logger.V(1).Info("requeuing request to set plugins")
+		emitTraceEvent(ctx, logger, "CLICommandsDeferred", map[string]any{
+			"reason":            "pluginsConfigUpdatedRecently",
+			"pluginsUpdatedAt":  pluginsConfig.Annotations[pluginsUpdateAnnotation],
+			"pluginsConfigName": pluginsConfig.Name,
+		}, "")
 		return 2 * time.Second, nil
 	}
 
 	if pluginsConfig.Annotations != nil && pluginsConfig.Annotations[pluginsUpdateAnnotation] != "" {
+		emitTraceEvent(ctx, logger, "PluginsConfigObserved", map[string]any{
+			"pluginsUpdatedAt": pluginsConfig.Annotations[pluginsUpdateAnnotation],
+			"enabledPlugins":   pluginsConfig.Data["enabled_plugins"],
+		}, "")
 		if err = r.runSetPluginsCommand(ctx, rmq, pluginsConfig); err != nil {
 			return 0, err
 		}
@@ -69,14 +148,31 @@ func (r *RabbitmqClusterReconciler) runEnableFeatureFlagsCommand(ctx context.Con
 	logger := ctrl.LoggerFrom(ctx)
 	podName := fmt.Sprintf("%s-0", rmq.ChildResourceName("server"))
 	cmd := "rabbitmqctl enable_feature_flag all"
+	emitTraceEvent(ctx, logger, "EnableFeatureFlagsStart", map[string]any{
+		"podName":             podName,
+		"command":             cmd,
+		"stsCreateAnnotation": sts.Annotations[stsCreateAnnotation],
+	}, podName)
 	stdout, stderr, err := r.exec(rmq.Namespace, podName, "rabbitmq", "bash", "-c", cmd)
 	if err != nil {
 		msg := "failed to enable all feature flags on pod"
 		logger.Error(err, msg, "pod", podName, "command", cmd, "stdout", stdout, "stderr", stderr)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
+		emitTraceEvent(ctx, logger, "EnableFeatureFlagsFailed", map[string]any{
+			"podName": podName,
+			"command": cmd,
+			"success": false,
+			"stdout":  stdout,
+			"stderr":  stderr,
+			"error":   err.Error(),
+		}, podName)
 		return fmt.Errorf("%s %s: %w", msg, podName, err)
 	}
 	logger.Info("successfully enabled all feature flags")
+	emitTraceEvent(ctx, logger, "FeatureFlagsEnabled", map[string]any{
+		"podName": podName,
+		"success": true,
+	}, podName)
 	return r.deleteAnnotation(ctx, sts, stsCreateAnnotation)
 }
 
@@ -90,13 +186,32 @@ func (r *RabbitmqClusterReconciler) runSetPluginsCommand(ctx context.Context, rm
 	for i := int32(0); i < *rmq.Spec.Replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", rmq.ChildResourceName("server"), i)
 		cmd := fmt.Sprintf("rabbitmq-plugins set %s", plugins.AsString(" "))
+		emitTraceEvent(ctx, logger, "SetPluginsStart", map[string]any{
+			"podName":  podName,
+			"command":  cmd,
+			"plugins":  plugins.DesiredPlugins(),
+			"configMap": configMap.Name,
+		}, podName)
 		stdout, stderr, err := r.exec(rmq.Namespace, podName, "rabbitmq", "sh", "-c", cmd)
 		if err != nil {
 			msg := "failed to set plugins on pod"
 			logger.Error(err, msg, "pod", podName, "command", cmd, "stdout", stdout, "stderr", stderr)
 			r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
+			emitTraceEvent(ctx, logger, "SetPluginsFailed", map[string]any{
+				"podName": podName,
+				"command": cmd,
+				"success": false,
+				"stdout":  stdout,
+				"stderr":  stderr,
+				"error":   err.Error(),
+			}, podName)
 			return fmt.Errorf("%s %s: %w", msg, podName, err)
 		}
+		emitTraceEvent(ctx, logger, "SetPlugins", map[string]any{
+			"podName": podName,
+			"plugins": plugins.DesiredPlugins(),
+			"success": true,
+		}, podName)
 	}
 	logger.Info("successfully set plugins")
 	return r.deleteAnnotation(ctx, configMap, pluginsUpdateAnnotation)
@@ -106,14 +221,30 @@ func (r *RabbitmqClusterReconciler) runQueueRebalanceCommand(ctx context.Context
 	logger := ctrl.LoggerFrom(ctx)
 	podName := fmt.Sprintf("%s-0", rmq.ChildResourceName("server"))
 	cmd := "rabbitmq-queues rebalance all"
+	emitTraceEvent(ctx, logger, "QueueRebalanceStart", map[string]any{
+		"podName": podName,
+		"command": cmd,
+	}, podName)
 	stdout, stderr, err := r.exec(rmq.Namespace, podName, "rabbitmq", "sh", "-c", cmd)
 	if err != nil {
 		msg := "failed to run queue rebalance on pod"
 		logger.Error(err, msg, "pod", podName, "command", cmd, "stdout", stdout, "stderr", stderr)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
+		emitTraceEvent(ctx, logger, "QueueRebalanceFailed", map[string]any{
+			"podName": podName,
+			"command": cmd,
+			"success": false,
+			"stdout":  stdout,
+			"stderr":  stderr,
+			"error":   err.Error(),
+		}, podName)
 		return fmt.Errorf("%s %s: %w", msg, podName, err)
 	}
 	logger.Info("successfully rebalanced queues")
+	emitTraceEvent(ctx, logger, "QueueRebalance", map[string]any{
+		"podName": podName,
+		"success": true,
+	}, podName)
 	return r.deleteAnnotation(ctx, rmq, queueRebalanceAnnotation)
 }
 
