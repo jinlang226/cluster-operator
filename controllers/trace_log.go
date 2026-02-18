@@ -30,14 +30,14 @@ type traceState struct {
 }
 
 var (
-	traceFileOnce sync.Once
-	traceFilePath string
-	traceFile     *os.File
-	traceFileErr  error
-	traceWriter   *bufio.Writer
-	traceFirst    bool
-	traceFileMu   sync.Mutex
-	traceCloseOnce sync.Once
+	traceFileOnce   sync.Once
+	traceFilePath   string
+	traceFile       *os.File
+	traceFileErr    error
+	traceWriter     *bufio.Writer
+	traceFirst      bool
+	traceFileMu     sync.Mutex
+	traceCloseOnce  sync.Once
 	traceSignalOnce sync.Once
 )
 
@@ -126,11 +126,11 @@ func modelSpecFromCluster(rmq *rabbitmqv1beta1.RabbitmqCluster) map[string]any {
 	}
 
 	return map[string]any{
-		"replicas":                 replicas,
-		"tlsEnabled":               rmq.TLSEnabled(),
-		"additionalPlugins":        plugins,
-		"advancedConfig":           advancedConfig,
-		"skipPostDeploySteps":      rmq.Spec.SkipPostDeploySteps,
+		"replicas":                  replicas,
+		"tlsEnabled":                rmq.TLSEnabled(),
+		"additionalPlugins":         plugins,
+		"advancedConfig":            advancedConfig,
+		"skipPostDeploySteps":       rmq.Spec.SkipPostDeploySteps,
 		"autoEnableAllFeatureFlags": rmq.Spec.AutoEnableAllFeatureFlags,
 	}
 }
@@ -283,7 +283,7 @@ func ensureTraceFile(logger logr.Logger) {
 	traceFileOnce.Do(func() {
 		traceFilePath = os.Getenv("TRACE_LOG_PATH")
 		if traceFilePath == "" {
-			traceFilePath = fmt.Sprintf("operator-trace-%s.json", time.Now().Format("20060102-150405"))
+			traceFilePath = fmt.Sprintf("/tmp/profile/operator-trace-%s.json", time.Now().Format("20060102-150405.000"))
 		}
 
 		f, err := os.OpenFile(traceFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)

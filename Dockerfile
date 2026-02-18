@@ -50,6 +50,7 @@ COPY --from=builder /workspace/manager .
 COPY --from=etc-builder /etc/passwd /etc/group /etc/
 COPY --from=etc-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
-USER 1000:1000
+# We need to write to /tmp/profile for the trace
+USER 0000:0000
 
 ENTRYPOINT ["/manager"]
