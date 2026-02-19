@@ -102,7 +102,7 @@ func (r *RabbitmqClusterReconciler) restartStatefulSetIfNeeded(ctx context.Conte
 		return 0, nil
 	}
 
-	sts, err := r.statefulSet(ctx, rmq)
+	sts, err := r.statefulSet(ctx, rmq, "restartCheck")
 	if err != nil {
 		// requeue request after 10s if unable to find sts, else return the error
 		emitTraceEvent(ctx, logger, "StatefulSetRestartCheckFailed", map[string]any{
@@ -121,7 +121,7 @@ func (r *RabbitmqClusterReconciler) restartStatefulSetIfNeeded(ctx context.Conte
 	if ok && stsRestartedAt > serverConfigUpdatedAt {
 		// sts was updated after the last server-conf configmap update; no need to restart sts
 		emitTraceEvent(ctx, logger, "StatefulSetRestartSkipped", map[string]any{
-			"reason":             "alreadyRestarted",
+			"reason":              "alreadyRestarted",
 			"serverConfUpdatedAt": serverConfigUpdatedAt,
 			"stsRestartedAt":      stsRestartedAt,
 		}, "")

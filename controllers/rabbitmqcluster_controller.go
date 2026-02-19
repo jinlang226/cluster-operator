@@ -176,31 +176,10 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	sts, err := r.statefulSet(ctx, rabbitmqCluster)
+	sts, err := r.statefulSet(ctx, rabbitmqCluster, "queueRebalanceCheck")
 	// The StatefulSet may not have been created by this point, so ignore Not Found errors
-	if err != nil && k8serrors.IsNotFound(err) {
-		emitTraceEvent(ctx, logger, "StatefulSetNotFound", map[string]any{
-			"phase": "queueRebalanceCheck",
-		}, "")
-	}
 	if client.IgnoreNotFound(err) != nil {
 		return ctrl.Result{}, err
-	}
-	if err == nil && sts != nil {
-		emitTraceEvent(ctx, logger, "StatefulSetStatusObserved", statefulSetStatusDetails(
-			sts.Name,
-			sts.Namespace,
-			filterAnnotations(sts.Annotations, stsCreateAnnotation),
-			filterAnnotations(sts.Spec.Template.Annotations, stsRestartAnnotation),
-			sts.Spec.Replicas,
-			sts.Status.Replicas,
-			sts.Status.ReadyReplicas,
-			sts.Status.AvailableReplicas,
-			sts.Status.CurrentReplicas,
-			sts.Status.UpdatedReplicas,
-			sts.Status.CurrentRevision,
-			sts.Status.UpdateRevision,
-		), "")
 	}
 	if sts != nil && statefulSetNeedsQueueRebalance(sts, rabbitmqCluster) {
 		if err := r.markForQueueRebalance(ctx, rabbitmqCluster); err != nil {
@@ -244,7 +223,7 @@ func (r *RabbitmqClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if builder.UpdateMayRequireStsRecreate() {
 			sts := resource.(*appsv1.StatefulSet)
 
-			current, err := r.statefulSet(ctx, rabbitmqCluster)
+			current, err := r.statefulSet(ctx, rabbitmqCluster, "scaleCheck")
 			if client.IgnoreNotFound(err) != nil {
 				return ctrl.Result{}, err
 			}

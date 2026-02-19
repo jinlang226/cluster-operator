@@ -22,6 +22,7 @@ type traceContextKey struct{}
 type traceState struct {
 	id          string
 	seq         int
+	stsGetSeq   int
 	reconcileID string
 	namespace   string
 	name        string
@@ -61,6 +62,15 @@ func withTrace(ctx context.Context, trace *traceState) context.Context {
 func traceFromContext(ctx context.Context) (*traceState, bool) {
 	trace, ok := ctx.Value(traceContextKey{}).(*traceState)
 	return trace, ok && trace != nil
+}
+
+func nextStatefulSetRequestIndex(ctx context.Context) int {
+	trace, ok := traceFromContext(ctx)
+	if !ok {
+		return 0
+	}
+	trace.stsGetSeq++
+	return trace.stsGetSeq
 }
 
 func emitTraceEvent(ctx context.Context, logger logr.Logger, eventType string, details map[string]any, podName string) {

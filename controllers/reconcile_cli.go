@@ -9,7 +9,6 @@ import (
 	"github.com/rabbitmq/cluster-operator/v2/internal/resource"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -18,19 +17,14 @@ const queueRebalanceAnnotation = "rabbitmq.com/queueRebalanceNeededAt"
 
 func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx context.Context, rmq *rabbitmqv1beta1.RabbitmqCluster) (requeueAfter time.Duration, err error) {
 	logger := ctrl.LoggerFrom(ctx)
-	sts, err := r.statefulSet(ctx, rmq)
+	sts, err := r.statefulSet(ctx, rmq, "cliCommands")
 	if err != nil {
-		if k8serrors.IsNotFound(err) {
-			emitTraceEvent(ctx, logger, "StatefulSetNotFound", map[string]any{
-				"phase": "cliCommands",
-			}, "")
-		}
 		emitTraceEvent(ctx, logger, "CLIConditionsObserved", map[string]any{
-			"cliStsFound":                      false,
-			"cliStsReady":                      false,
-			"cliPluginsConfigUpdatedRecently":  false,
-			"cliPluginsUpdateAnnotationPresent": false,
-			"cliStsCreateAnnotationPresent":    false,
+			"cliStsFound":                        false,
+			"cliStsReady":                        false,
+			"cliPluginsConfigUpdatedRecently":    false,
+			"cliPluginsUpdateAnnotationPresent":  false,
+			"cliStsCreateAnnotationPresent":      false,
 			"cliQueueRebalanceAnnotationPresent": rmq.Annotations != nil && rmq.Annotations[queueRebalanceAnnotation] != "",
 		}, "")
 		return 0, err
@@ -38,11 +32,11 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 	if !allReplicasReadyAndUpdated(sts) {
 		logger.V(1).Info("not all replicas ready yet; requeuing request to run RabbitMQ CLI commands")
 		emitTraceEvent(ctx, logger, "CLIConditionsObserved", map[string]any{
-			"cliStsFound":                      true,
-			"cliStsReady":                      false,
-			"cliPluginsConfigUpdatedRecently":  false,
-			"cliPluginsUpdateAnnotationPresent": false,
-			"cliStsCreateAnnotationPresent":    sts.Annotations != nil && sts.Annotations[stsCreateAnnotation] != "",
+			"cliStsFound":                        true,
+			"cliStsReady":                        false,
+			"cliPluginsConfigUpdatedRecently":    false,
+			"cliPluginsUpdateAnnotationPresent":  false,
+			"cliStsCreateAnnotationPresent":      sts.Annotations != nil && sts.Annotations[stsCreateAnnotation] != "",
 			"cliQueueRebalanceAnnotationPresent": rmq.Annotations != nil && rmq.Annotations[queueRebalanceAnnotation] != "",
 		}, "")
 		emitTraceEvent(ctx, logger, "CLICommandsDeferred", map[string]any{
@@ -97,11 +91,11 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 		}
 	}
 	emitTraceEvent(ctx, logger, "CLIConditionsObserved", map[string]any{
-		"cliStsFound":                      true,
-		"cliStsReady":                      true,
-		"cliPluginsConfigUpdatedRecently":  updatedRecently,
-		"cliPluginsUpdateAnnotationPresent": pluginsUpdateAnnotationPresent,
-		"cliStsCreateAnnotationPresent":    sts.Annotations != nil && sts.Annotations[stsCreateAnnotation] != "",
+		"cliStsFound":                        true,
+		"cliStsReady":                        true,
+		"cliPluginsConfigUpdatedRecently":    updatedRecently,
+		"cliPluginsUpdateAnnotationPresent":  pluginsUpdateAnnotationPresent,
+		"cliStsCreateAnnotationPresent":      sts.Annotations != nil && sts.Annotations[stsCreateAnnotation] != "",
 		"cliQueueRebalanceAnnotationPresent": rmq.Annotations != nil && rmq.Annotations[queueRebalanceAnnotation] != "",
 	}, "")
 	if updatedRecently {
@@ -187,9 +181,9 @@ func (r *RabbitmqClusterReconciler) runSetPluginsCommand(ctx context.Context, rm
 		podName := fmt.Sprintf("%s-%d", rmq.ChildResourceName("server"), i)
 		cmd := fmt.Sprintf("rabbitmq-plugins set %s", plugins.AsString(" "))
 		emitTraceEvent(ctx, logger, "SetPluginsStart", map[string]any{
-			"podName":  podName,
-			"command":  cmd,
-			"plugins":  plugins.DesiredPlugins(),
+			"podName":   podName,
+			"command":   cmd,
+			"plugins":   plugins.DesiredPlugins(),
 			"configMap": configMap.Name,
 		}, podName)
 		stdout, stderr, err := r.exec(rmq.Namespace, podName, "rabbitmq", "sh", "-c", cmd)

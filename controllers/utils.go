@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -57,11 +58,38 @@ func errorIsConflictOrNotFound(err error) bool {
 	return errors.IsConflict(err) || errors.IsNotFound(err)
 }
 
-func (r *RabbitmqClusterReconciler) statefulSet(ctx context.Context, rmq *rabbitmqv1beta1.RabbitmqCluster) (*appsv1.StatefulSet, error) {
+func (r *RabbitmqClusterReconciler) statefulSet(ctx context.Context, rmq *rabbitmqv1beta1.RabbitmqCluster, phase string) (*appsv1.StatefulSet, error) {
+	logger := ctrl.LoggerFrom(ctx)
+	requestIndex := nextStatefulSetRequestIndex(ctx)
 	sts := &appsv1.StatefulSet{}
 	if err := r.Get(ctx, types.NamespacedName{Name: rmq.ChildResourceName("server"), Namespace: rmq.Namespace}, sts); err != nil {
+		if errors.IsNotFound(err) {
+			emitTraceEvent(ctx, logger, "StatefulSetNotFound", map[string]any{
+				"phase":            phase,
+				"requestIndex":     requestIndex,
+				"statefulSetFound": false,
+			}, "")
+		}
 		return nil, err
 	}
+	details := statefulSetStatusDetails(
+		sts.Name,
+		sts.Namespace,
+		filterAnnotations(sts.Annotations, stsCreateAnnotation),
+		filterAnnotations(sts.Spec.Template.Annotations, stsRestartAnnotation),
+		sts.Spec.Replicas,
+		sts.Status.Replicas,
+		sts.Status.ReadyReplicas,
+		sts.Status.AvailableReplicas,
+		sts.Status.CurrentReplicas,
+		sts.Status.UpdatedReplicas,
+		sts.Status.CurrentRevision,
+		sts.Status.UpdateRevision,
+	)
+	details["phase"] = phase
+	details["requestIndex"] = requestIndex
+	details["statefulSetFound"] = true
+	emitTraceEvent(ctx, logger, "StatefulSetStatusObserved", details, "")
 	return sts, nil
 }
 
