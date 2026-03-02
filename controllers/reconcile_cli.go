@@ -19,6 +19,10 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 	logger := ctrl.LoggerFrom(ctx)
 	sts, err := r.statefulSet(ctx, rmq, "cliCommands")
 	if err != nil {
+		emitTraceEvent(ctx, logger, "StatefulSetNotFound", map[string]any{
+			"phase":            "cliCommands",
+			"statefulSetFound": false,
+		}, "")
 		emitTraceEvent(ctx, logger, "CLIConditionsObserved", map[string]any{
 			"cliStsFound":                        false,
 			"cliStsReady":                        false,
@@ -29,6 +33,24 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 		}, "")
 		return 0, err
 	}
+	cliStsStatus := statefulSetStatusDetails(
+		sts.Name,
+		sts.Namespace,
+		filterAnnotations(sts.Annotations, stsCreateAnnotation),
+		filterAnnotations(sts.Spec.Template.Annotations, stsRestartAnnotation),
+		sts.Spec.Replicas,
+		sts.Status.Replicas,
+		sts.Status.ReadyReplicas,
+		sts.Status.AvailableReplicas,
+		sts.Status.CurrentReplicas,
+		sts.Status.UpdatedReplicas,
+		sts.Status.CurrentRevision,
+		sts.Status.UpdateRevision,
+	)
+	cliStsStatus["phase"] = "cliCommands"
+	cliStsStatus["statefulSetFound"] = true
+	emitTraceEvent(ctx, logger, "StatefulSetStatusObserved", cliStsStatus, "")
+
 	if !allReplicasReadyAndUpdated(sts) {
 		logger.V(1).Info("not all replicas ready yet; requeuing request to run RabbitMQ CLI commands")
 		emitTraceEvent(ctx, logger, "CLIConditionsObserved", map[string]any{
@@ -40,39 +62,13 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 			"cliQueueRebalanceAnnotationPresent": rmq.Annotations != nil && rmq.Annotations[queueRebalanceAnnotation] != "",
 		}, "")
 		emitTraceEvent(ctx, logger, "CLICommandsDeferred", map[string]any{
-			"reason": "statefulSetNotReady",
-			"stsStatus": statefulSetStatusDetails(
-				sts.Name,
-				sts.Namespace,
-				filterAnnotations(sts.Annotations, stsCreateAnnotation),
-				filterAnnotations(sts.Spec.Template.Annotations, stsRestartAnnotation),
-				sts.Spec.Replicas,
-				sts.Status.Replicas,
-				sts.Status.ReadyReplicas,
-				sts.Status.AvailableReplicas,
-				sts.Status.CurrentReplicas,
-				sts.Status.UpdatedReplicas,
-				sts.Status.CurrentRevision,
-				sts.Status.UpdateRevision,
-			),
+			"reason":    "statefulSetNotReady",
+			"stsStatus": cliStsStatus,
 		}, "")
 		return 15 * time.Second, nil
 	}
 	emitTraceEvent(ctx, logger, "CLICommandsReady", map[string]any{
-		"stsStatus": statefulSetStatusDetails(
-			sts.Name,
-			sts.Namespace,
-			filterAnnotations(sts.Annotations, stsCreateAnnotation),
-			filterAnnotations(sts.Spec.Template.Annotations, stsRestartAnnotation),
-			sts.Spec.Replicas,
-			sts.Status.Replicas,
-			sts.Status.ReadyReplicas,
-			sts.Status.AvailableReplicas,
-			sts.Status.CurrentReplicas,
-			sts.Status.UpdatedReplicas,
-			sts.Status.CurrentRevision,
-			sts.Status.UpdateRevision,
-		),
+		"stsStatus": cliStsStatus,
 	}, "")
 	// Retrieve the plugins config map, if it exists.
 	pluginsConfig, err := r.configMap(ctx, rmq, rmq.ChildResourceName(resource.PluginsConfigName))
